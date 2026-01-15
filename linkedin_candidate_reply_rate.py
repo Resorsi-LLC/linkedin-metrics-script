@@ -115,6 +115,99 @@ def contains_zoho_form(text: str) -> bool:
     return "forms.zohopublic.com" in text.lower()
 
 
+def file_signature(path: str) -> dict | None:
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return {"path": os.path.abspath(path), "mtime": int(st.st_mtime), "size": st.st_size}
+
+
+def build_manifest(args: argparse.Namespace) -> dict:
+    return {
+        "script": os.path.basename(__file__),
+        "inputs": {
+            "candidates": file_signature(args.candidates),
+            "connections": file_signature(args.connections),
+            "messages": file_signature(args.messages),
+            "use_ai": bool(args.use_ai),
+            "openai_model": args.openai_model,
+            "max_prompt_messages": args.max_prompt_messages,
+            "max_prompt_chars": args.max_prompt_chars,
+            "limit_messages": args.limit_messages,
+            "limit_connections": args.limit_connections,
+        },
+    }
+
+
+def load_manifest(path: str) -> dict | None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def max_mtime(paths: List[str]) -> Optional[int]:
+    mtimes = []
+    for p in paths:
+        try:
+            mtimes.append(int(os.path.getmtime(p)))
+        except OSError:
+            return None
+    return max(mtimes) if mtimes else None
+
+
+def outputs_fresh(output_paths: List[str], input_paths: List[str]) -> bool:
+    inputs_mtime = max_mtime(input_paths)
+    outputs_mtime = max_mtime(output_paths)
+    if inputs_mtime is None or outputs_mtime is None:
+        return False
+    return outputs_mtime >= inputs_mtime
+
+
+def list_chart_paths(outdir: str) -> list[str]:
+    if not os.path.isdir(outdir):
+        return []
+    return sorted(
+        os.path.join(outdir, f)
+        for f in os.listdir(outdir)
+        if f.lower().endswith(".png")
+    )
+
+
+def maybe_exit_if_analyzed(args: argparse.Namespace, manifest_path: str) -> None:
+    input_paths = [args.candidates, args.connections, args.messages]
+    expected_outputs = [
+        os.path.join(args.outdir, "connections_enriched_candidate_labels.csv"),
+        os.path.join(args.outdir, "candidate_connections_only.csv"),
+        os.path.join(args.outdir, "summary.json"),
+    ]
+    if not os.path.exists(manifest_path):
+        charts = list_chart_paths(args.outdir)
+        if charts and outputs_fresh(expected_outputs, input_paths):
+            print("Analysis already exists for these inputs; skipping recompute.")
+            print("Charts:")
+            for p in charts:
+                print(p)
+            raise SystemExit(0)
+        return
+    existing = load_manifest(manifest_path)
+    if not existing:
+        return
+    current = build_manifest(args)
+    if existing.get("inputs") != current.get("inputs"):
+        return
+    charts = list_chart_paths(args.outdir)
+    if not charts:
+        return
+    print("Analysis already exists for these inputs; skipping recompute.")
+    print("Charts:")
+    for p in charts:
+        print(p)
+    raise SystemExit(0)
+
+
 # -----------------------------
 # Chart helpers (title-safe)
 # -----------------------------
@@ -433,6 +526,9 @@ def main():
     parser.add_argument("--limit_connections", type=int, default=0, help="For debugging: limit connections rows read (0 = no limit).")
     args = parser.parse_args()
 
+    manifest_path = os.path.join(args.outdir, "analysis_manifest_reply_rate.json")
+    maybe_exit_if_analyzed(args, manifest_path)
+
     logger = setup_logger(args.outdir, args.log_level)
 
     with step(logger, "Read CSVs"):
@@ -669,6 +765,15 @@ def main():
                   "Candidates", "Outcome",
                   os.path.join(args.outdir, "candidate_reply_outcomes_strict.png"))
 
+        manifest = build_manifest(args)
+        manifest["outputs"] = {
+            "csv": [out_all, out_candidates],
+            "charts": list_chart_paths(args.outdir),
+            "summary_json": os.path.join(args.outdir, "summary.json"),
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
         logger.info("=== FINAL METRIC ===")
         logger.info(f"Accepted connections (people): {len(base):,}")
         logger.info(f"Candidate connections: {denom:,}")
@@ -680,4 +785,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

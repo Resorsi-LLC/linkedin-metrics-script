@@ -39,6 +39,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 from datetime import datetime
 
@@ -154,6 +155,96 @@ def parse_dt_flex(series: pd.Series) -> pd.Series:
     return dt2
 
 
+def file_signature(path: str) -> dict | None:
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return {"path": os.path.abspath(path), "mtime": int(st.st_mtime), "size": st.st_size}
+
+
+def build_manifest(args: argparse.Namespace) -> dict:
+    return {
+        "script": os.path.basename(__file__),
+        "inputs": {
+            "candidates": file_signature(args.candidates),
+            "connections": file_signature(args.connections),
+            "messages": file_signature(args.messages),
+            "topn": args.topn,
+            "today": args.today,
+        },
+    }
+
+
+def load_manifest(path: str) -> dict | None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def max_mtime(paths: list[str]) -> int | None:
+    mtimes = []
+    for p in paths:
+        try:
+            mtimes.append(int(os.path.getmtime(p)))
+        except OSError:
+            return None
+    return max(mtimes) if mtimes else None
+
+
+def outputs_fresh(output_paths: list[str], input_paths: list[str]) -> bool:
+    inputs_mtime = max_mtime(input_paths)
+    outputs_mtime = max_mtime(output_paths)
+    if inputs_mtime is None or outputs_mtime is None:
+        return False
+    return outputs_mtime >= inputs_mtime
+
+
+def list_chart_paths(outdir: str) -> list[str]:
+    if not os.path.isdir(outdir):
+        return []
+    return sorted(
+        os.path.join(outdir, f)
+        for f in os.listdir(outdir)
+        if f.lower().endswith(".png")
+    )
+
+
+def maybe_exit_if_analyzed(args: argparse.Namespace, manifest_path: str) -> None:
+    input_paths = [args.candidates, args.connections, args.messages]
+    expected_outputs = [
+        os.path.join(args.outdir, "candidates_enriched_matches.csv"),
+        os.path.join(args.outdir, "candidates_matching_any.csv"),
+        os.path.join(args.outdir, "candidates_matching_all.csv"),
+        os.path.join(args.outdir, "messages_involving_candidates.csv"),
+    ]
+    if not os.path.exists(manifest_path):
+        charts = list_chart_paths(args.outdir)
+        if charts and outputs_fresh(expected_outputs, input_paths):
+            print("Analysis already exists for these inputs; skipping recompute.")
+            print("Charts:")
+            for p in charts:
+                print(p)
+            raise SystemExit(0)
+        return
+    existing = load_manifest(manifest_path)
+    if not existing:
+        return
+    current = build_manifest(args)
+    if existing.get("inputs") != current.get("inputs"):
+        return
+    charts = list_chart_paths(args.outdir)
+    if not charts:
+        return
+    print("Analysis already exists for these inputs; skipping recompute.")
+    print("Charts:")
+    for p in charts:
+        print(p)
+    raise SystemExit(0)
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -166,6 +257,9 @@ def main():
     parser.add_argument("--topn", type=int, default=20)
     parser.add_argument("--today", default=None, help="Override today as YYYY-MM-DD for recency bucketing.")
     args = parser.parse_args()
+
+    manifest_path = os.path.join(args.outdir, "analysis_manifest_linkedin_metrics.json")
+    maybe_exit_if_analyzed(args, manifest_path)
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -408,6 +502,14 @@ def main():
             topn=30,
         )
 
+    manifest = build_manifest(args)
+    manifest["outputs"] = {
+        "csv": [enriched_out, any_out, all_out, msg_extract_out],
+        "charts": list_chart_paths(args.outdir),
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
     # Print run summary
     print("=== Run Summary ===")
     print(f"Candidates (valid LinkedIn): {len(enriched):,}")
@@ -425,4 +527,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
