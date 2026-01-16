@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 
 # -----------------------------
@@ -140,14 +141,6 @@ def build_manifest(args: argparse.Namespace) -> dict:
     }
 
 
-def load_manifest(path: str) -> dict | None:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 def max_mtime(paths: List[str]) -> Optional[int]:
     mtimes = []
     for p in paths:
@@ -166,6 +159,68 @@ def outputs_fresh(output_paths: List[str], input_paths: List[str]) -> bool:
     return outputs_mtime >= inputs_mtime
 
 
+def try_regenerate_charts_from_cache(args: argparse.Namespace, manifest_path: str) -> bool:
+    input_paths = [args.candidates, args.connections, args.messages]
+    out_all = os.path.join(args.outdir, "connections_enriched_candidate_labels.csv")
+    out_candidates = os.path.join(args.outdir, "candidate_connections_only.csv")
+    summary_path = os.path.join(args.outdir, "summary.json")
+    expected_outputs = [out_all]
+
+    if not outputs_fresh(expected_outputs, input_paths):
+        return False
+
+    try:
+        base = pd.read_csv(out_all)
+    except OSError:
+        return False
+
+    candidates_only = base[base["candidate_label"] == "CANDIDATE"].copy()
+    denom = len(candidates_only)
+    replied = candidates_only.get("replied_after_connect", pd.Series(dtype=bool)).fillna(False).astype(bool)
+    num = int(replied.sum())
+
+    print("Analysis already exists for these inputs; updating charts from cached outputs.")
+    seg_counts = base["candidate_label"].value_counts()
+    bar_chart(
+        seg_counts,
+        "Accepted Connections — Classification (Candidate vs Non-Candidate vs Uncertain)",
+        "Connections",
+        "Class",
+        os.path.join(args.outdir, "classification_breakdown.png"),
+        show_pct=True,
+        total=len(base),
+        note="Share of accepted connections by label.",
+        callout=f"Total accepted connections: {format_count(len(base))}",
+    )
+
+    rr_counts = pd.Series({"Candidate replied (strict)": num, "Candidate did not reply (strict)": denom - num})
+    bar_chart(
+        rr_counts,
+        "Candidate Connections — Replies After Acceptance (Strict Date Enforcement)",
+        "Candidates",
+        "Outcome",
+        os.path.join(args.outdir, "candidate_reply_outcomes_strict.png"),
+        show_pct=True,
+        total=denom,
+        note="Share of candidate connections who replied after acceptance.",
+        callout=f"Total candidates: {format_count(denom)}",
+    )
+
+    manifest = build_manifest(args)
+    manifest["outputs"] = {
+        "csv": [out_all, out_candidates],
+        "charts": list_chart_paths(args.outdir),
+        "summary_json": summary_path,
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    print("Charts:")
+    for p in list_chart_paths(args.outdir):
+        print(p)
+    return True
+
+
 def list_chart_paths(outdir: str) -> list[str]:
     if not os.path.isdir(outdir):
         return []
@@ -176,42 +231,60 @@ def list_chart_paths(outdir: str) -> list[str]:
     )
 
 
-def maybe_exit_if_analyzed(args: argparse.Namespace, manifest_path: str) -> None:
-    input_paths = [args.candidates, args.connections, args.messages]
-    expected_outputs = [
-        os.path.join(args.outdir, "connections_enriched_candidate_labels.csv"),
-        os.path.join(args.outdir, "candidate_connections_only.csv"),
-        os.path.join(args.outdir, "summary.json"),
-    ]
-    if not os.path.exists(manifest_path):
-        charts = list_chart_paths(args.outdir)
-        if charts and outputs_fresh(expected_outputs, input_paths):
-            print("Analysis already exists for these inputs; skipping recompute.")
-            print("Charts:")
-            for p in charts:
-                print(p)
-            raise SystemExit(0)
-        return
-    existing = load_manifest(manifest_path)
-    if not existing:
-        return
-    current = build_manifest(args)
-    if existing.get("inputs") != current.get("inputs"):
-        return
-    charts = list_chart_paths(args.outdir)
-    if not charts:
-        return
-    print("Analysis already exists for these inputs; skipping recompute.")
-    print("Charts:")
-    for p in charts:
-        print(p)
-    raise SystemExit(0)
+
 
 
 # -----------------------------
 # Chart helpers (title-safe)
 # -----------------------------
-def bar_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: str, topn: Optional[int] = None):
+def format_count(value) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    return f"{int(round(v)):,}"
+
+
+def format_compact(value, _pos=None) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    sign = "-" if v < 0 else ""
+    v = abs(v)
+    if v >= 1_000_000:
+        return f"{sign}{v / 1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{sign}{v / 1_000:.1f}k"
+    if v >= 1:
+        return f"{sign}{int(round(v))}"
+    return f"{sign}{v:.2f}".rstrip("0").rstrip(".")
+
+
+def add_footer(fig, note: Optional[str]) -> None:
+    if not note:
+        return
+    fig.text(0.01, 0.01, note, ha="left", va="bottom", fontsize=9, color="0.35")
+
+
+def add_callout(ax, text: Optional[str]) -> None:
+    if not text:
+        return
+    ax.text(
+        0.98,
+        0.98,
+        text,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=10,
+        bbox={"boxstyle": "round,pad=0.3", "fc": "white", "ec": "0.8"},
+    )
+
+
+def bar_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: str,
+              topn: Optional[int] = None, show_pct: bool = False, total: Optional[int] = None,
+              note: Optional[str] = None, callout: Optional[str] = None):
     if series is None or len(series) == 0:
         return
 
@@ -228,7 +301,34 @@ def bar_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
 
-    plt.subplots_adjust(top=0.88, left=0.35, right=0.98, bottom=0.10)
+    max_val = float(data.max()) if len(data) else 0.0
+    if max_val > 0:
+        ax.set_xlim(0, max_val * 1.15)
+
+    ax.xaxis.set_major_formatter(FuncFormatter(format_compact))
+
+    pct_total = total if total is not None else (data.sum() if show_pct else None)
+    for bar in ax.patches:
+        value = bar.get_width()
+        if value == 0:
+            continue
+        label = format_count(value)
+        if show_pct and pct_total:
+            pct = (value / pct_total) * 100
+            label = f"{label} ({pct:.1f}%)"
+        ax.text(
+            value + (max_val * 0.01 if max_val else 0.01),
+            bar.get_y() + bar.get_height() / 2,
+            label,
+            va="center",
+            ha="left",
+            fontsize=9,
+        )
+
+    add_callout(ax, callout)
+    add_footer(fig, note)
+
+    plt.subplots_adjust(top=0.88, left=0.35, right=0.98, bottom=0.12)
 
     plt.savefig(outpath, dpi=200)
     plt.close(fig)
@@ -527,7 +627,8 @@ def main():
     args = parser.parse_args()
 
     manifest_path = os.path.join(args.outdir, "analysis_manifest_reply_rate.json")
-    maybe_exit_if_analyzed(args, manifest_path)
+    if try_regenerate_charts_from_cache(args, manifest_path):
+        return
 
     logger = setup_logger(args.outdir, args.log_level)
 
@@ -754,16 +855,30 @@ def main():
 
         # Charts
         seg_counts = base["candidate_label"].value_counts()
-        bar_chart(seg_counts,
-                  "Accepted Connections — Classification (Candidate vs Non-Candidate vs Uncertain)",
-                  "Connections", "Class",
-                  os.path.join(args.outdir, "classification_breakdown.png"))
+        bar_chart(
+            seg_counts,
+            "Accepted Connections — Classification (Candidate vs Non-Candidate vs Uncertain)",
+            "Connections",
+            "Class",
+            os.path.join(args.outdir, "classification_breakdown.png"),
+            show_pct=True,
+            total=len(base),
+            note="Share of accepted connections by label.",
+            callout=f"Total accepted connections: {format_count(len(base))}",
+        )
 
         rr_counts = pd.Series({"Candidate replied (strict)": num, "Candidate did not reply (strict)": denom - num})
-        bar_chart(rr_counts,
-                  "Candidate Connections — Replies After Acceptance (Strict Date Enforcement)",
-                  "Candidates", "Outcome",
-                  os.path.join(args.outdir, "candidate_reply_outcomes_strict.png"))
+        bar_chart(
+            rr_counts,
+            "Candidate Connections — Replies After Acceptance (Strict Date Enforcement)",
+            "Candidates",
+            "Outcome",
+            os.path.join(args.outdir, "candidate_reply_outcomes_strict.png"),
+            show_pct=True,
+            total=denom,
+            note="Share of candidate connections who replied after acceptance.",
+            callout=f"Total candidates: {format_count(denom)}",
+        )
 
         manifest = build_manifest(args)
         manifest["outputs"] = {

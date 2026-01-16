@@ -45,6 +45,8 @@ from datetime import datetime
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
 
 
 # -----------------------------
@@ -74,7 +76,63 @@ def safe_value_counts(s: pd.Series) -> pd.Series:
     return s2.value_counts()
 
 
-def bar_chart(series, title, xlabel, ylabel, outpath, topn=None):
+def format_count(value) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    return f"{int(round(v)):,}"
+
+
+def format_compact(value, _pos=None) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    sign = "-" if v < 0 else ""
+    v = abs(v)
+    if v >= 1_000_000:
+        return f"{sign}{v / 1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{sign}{v / 1_000:.1f}k"
+    if v >= 1:
+        return f"{sign}{int(round(v))}"
+    return f"{sign}{v:.2f}".rstrip("0").rstrip(".")
+
+
+def add_footer(fig, note: str | None) -> None:
+    if not note:
+        return
+    fig.text(0.01, 0.01, note, ha="left", va="bottom", fontsize=9, color="0.35")
+
+
+def add_callout(ax, text: str | None) -> None:
+    if not text:
+        return
+    ax.text(
+        0.98,
+        0.98,
+        text,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=10,
+        bbox={"boxstyle": "round,pad=0.3", "fc": "white", "ec": "0.8"},
+    )
+
+
+def bar_chart(
+    series,
+    title,
+    xlabel,
+    ylabel,
+    outpath,
+    topn=None,
+    show_pct=False,
+    total=None,
+    note=None,
+    callout=None,
+):
     if series is None or len(series) == 0:
         return
 
@@ -94,25 +152,157 @@ def bar_chart(series, title, xlabel, ylabel, outpath, topn=None):
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
 
-    # Ensure enough space for title
-    plt.subplots_adjust(top=0.88, left=0.35)
+    max_val = float(data.max()) if len(data) else 0.0
+    if max_val > 0:
+        ax.set_xlim(0, max_val * 1.15)
+
+    ax.xaxis.set_major_formatter(FuncFormatter(format_compact))
+
+    pct_total = total if total is not None else (data.sum() if show_pct else None)
+    for bar in ax.patches:
+        value = bar.get_width()
+        if value == 0:
+            continue
+        label = format_count(value)
+        if show_pct and pct_total:
+            pct = (value / pct_total) * 100
+            label = f"{label} ({pct:.1f}%)"
+        ax.text(
+            value + (max_val * 0.01 if max_val else 0.01),
+            bar.get_y() + bar.get_height() / 2,
+            label,
+            va="center",
+            ha="left",
+            fontsize=9,
+        )
+
+    add_callout(ax, callout)
+    add_footer(fig, note)
+
+    # Ensure enough space for title and footer
+    plt.subplots_adjust(top=0.88, left=0.35, bottom=0.12)
 
     plt.savefig(outpath, dpi=200)
     plt.close(fig)
 
 
+def configure_year_month_axis(ax, min_dt: datetime, max_dt: datetime) -> None:
+    ax.xaxis.set_major_locator(mdates.YearLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
+    ax.xaxis.set_minor_formatter(mdates.DateFormatter("%b"))
+    ax.tick_params(
+        axis="x",
+        which="major",
+        pad=16,
+        labelsize=10,
+        top=True,
+        labeltop=True,
+        bottom=False,
+        labelbottom=False,
+    )
+    ax.tick_params(axis="x", which="minor", labelsize=8, rotation=45, bottom=True, labelbottom=True)
+    ax.grid(which="minor", axis="x", linestyle=":", alpha=0.15)
+    for year in range(min_dt.year, max_dt.year + 1):
+        ax.axvline(datetime(year, 1, 1), color="0.85", lw=1, zorder=0)
 
-def line_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: str):
+
+def line_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: str, note=None, callout=None):
     if series is None or len(series) == 0:
         return
-    plt.figure()
-    series.sort_index().plot(kind="line")
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.tight_layout()
+
+    idx = series.index
+    if isinstance(idx, pd.PeriodIndex):
+        dt_index = idx.to_timestamp()
+    else:
+        dt_index = pd.to_datetime(idx.astype(str), errors="coerce")
+    series_dt = series.copy()
+    series_dt.index = dt_index
+    series_dt = series_dt[series_dt.index.notna()].sort_index()
+    if series_dt.empty:
+        return
+
+    min_dt = series_dt.index.min()
+    max_dt = series_dt.index.max()
+    full_index = pd.date_range(min_dt.to_period("M").to_timestamp(), max_dt.to_period("M").to_timestamp(), freq="MS")
+    series_dt = series_dt.reindex(full_index).fillna(0)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(series_dt.index, series_dt.values, marker="o", linewidth=2, markersize=4)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.yaxis.set_major_formatter(FuncFormatter(format_compact))
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    configure_year_month_axis(ax, min_dt, max_dt)
+
+    values = series_dt.values
+    points = len(values)
+    max_val = float(values.max()) if points else 0.0
+    y_top = max_val * 1.2 if max_val > 0 else 1
+    ax.set_ylim(0, y_top)
+
+    quarter = series_dt.index.to_period("Q")
+    quarter_max = {}
+    for i, (q, y) in enumerate(zip(quarter, values)):
+        if q not in quarter_max or y > quarter_max[q][1]:
+            quarter_max[q] = (i, y)
+
+    for q in sorted(quarter_max.keys()):
+        i, y = quarter_max[q]
+        if y < 10:
+            continue
+        x = series_dt.index[i]
+        ax.annotate(
+            format_count(y),
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, 10),
+            ha="center",
+            fontsize=9,
+            arrowprops={"arrowstyle": "-|>", "color": "0.3", "lw": 0.8},
+        )
+
+    add_callout(ax, callout)
+    footer_note = note or ""
+    if "Months with no activity shown as 0." not in footer_note:
+        footer_note = (footer_note + " " if footer_note else "") + "Months with no activity shown as 0."
+    if "Quarterly peaks are labeled." not in footer_note:
+        footer_note = (footer_note + " " if footer_note else "") + "Quarterly peaks are labeled."
+    add_footer(fig, footer_note)
+
+    plt.subplots_adjust(top=0.85, bottom=0.18)
     plt.savefig(outpath, dpi=200)
-    plt.close()
+    plt.close(fig)
+
+
+def line_charts_by_year(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: str, note=None) -> None:
+    if series is None or len(series) == 0:
+        return
+
+    idx = series.index
+    if isinstance(idx, pd.PeriodIndex):
+        dt_index = idx.to_timestamp()
+    else:
+        dt_index = pd.to_datetime(idx.astype(str), errors="coerce")
+    series_dt = series.copy()
+    series_dt.index = dt_index
+    series_dt = series_dt[series_dt.index.notna()].sort_index()
+    if series_dt.empty:
+        return
+
+    years = sorted(series_dt.index.year.unique().tolist())
+    base, ext = os.path.splitext(outpath)
+    for year in years:
+        start = datetime(year, 1, 1)
+        end = datetime(year, 12, 1)
+        full_index = pd.date_range(start, end, freq="MS")
+        year_series = series_dt[series_dt.index.year == year].reindex(full_index).fillna(0)
+        year_title = f"{title} ({year})"
+        year_outpath = f"{base}_{year}{ext}"
+        year_callout = f"Total in {year}: {format_count(year_series.sum())}"
+        line_chart(year_series, year_title, xlabel, ylabel, year_outpath, note=note, callout=year_callout)
 
 
 def seniority_bucket(title: str) -> str:
@@ -176,14 +366,6 @@ def build_manifest(args: argparse.Namespace) -> dict:
     }
 
 
-def load_manifest(path: str) -> dict | None:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 def max_mtime(paths: list[str]) -> int | None:
     mtimes = []
     for p in paths:
@@ -212,37 +394,239 @@ def list_chart_paths(outdir: str) -> list[str]:
     )
 
 
-def maybe_exit_if_analyzed(args: argparse.Namespace, manifest_path: str) -> None:
+def ensure_match_segment(enriched: pd.DataFrame) -> None:
+    if "match_segment" in enriched.columns:
+        return
+    if "is_connected_match" not in enriched.columns or "is_contacted_match" not in enriched.columns:
+        return
+
+    def segment_row(r):
+        c = bool(r["is_connected_match"])
+        m = bool(r["is_contacted_match"])
+        if c and m:
+            return "Connected + Contacted (Matched)"
+        if c and not m:
+            return "Connected Only (Matched)"
+        if (not c) and m:
+            return "Contacted Only (Matched)"
+        return "Not Matched (Neither)"
+
+    enriched["match_segment"] = enriched.apply(segment_row, axis=1)
+
+
+def render_charts(
+    enriched: pd.DataFrame,
+    msg_extract: pd.DataFrame,
+    conn_date_col: str | None,
+    conn_company_col: str | None,
+    conn_position_col: str | None,
+    msg_date_col: str | None,
+    msg_folder_col: str | None,
+    args: argparse.Namespace,
+) -> None:
+    ensure_match_segment(enriched)
+    matched_note = "Matched = candidate LinkedIn URL found in Candidates + referenced file."
+
+    # Chart 1: Match segmentation
+    seg_counts = enriched["match_segment"].value_counts()
+    bar_chart(
+        seg_counts,
+        title="Candidate Match Segmentation (Connected vs Contacted)",
+        xlabel="Candidates",
+        ylabel="Match segment",
+        outpath=os.path.join(args.outdir, "candidate_match_segmentation_connected_vs_contacted.png"),
+        topn=None,
+        show_pct=True,
+        total=len(enriched),
+        note="Share of candidates matched against connections or messages. " + matched_note,
+        callout=f"Total candidates: {format_count(len(enriched))}",
+    )
+
+    # Chart 2: Connected candidates (matched) over time — monthly
+    if conn_date_col is not None and conn_date_col in enriched.columns:
+        connected_dt = parse_dt_flex(enriched[conn_date_col])
+        enriched["_connected_dt"] = connected_dt
+
+        connected_only = enriched[enriched["is_connected_match"] & enriched["_connected_dt"].notna()].copy()
+        if len(connected_only) > 0:
+            monthly_conn = (
+                connected_only.assign(month=lambda d: d["_connected_dt"].dt.to_period("M").astype(str))
+                .groupby("month")
+                .size()
+            )
+            line_charts_by_year(
+                monthly_conn,
+                title="Connected Candidates (Matched) Over Time — Monthly",
+                xlabel="Month",
+                ylabel="Connected candidates",
+                outpath=os.path.join(args.outdir, "connected_candidates_matched_over_time_monthly.png"),
+                note="Monthly count of connected candidates present in the input list. " + matched_note,
+            )
+
+            # Connection recency buckets
+            today = datetime.strptime(args.today, "%Y-%m-%d").date() if args.today else datetime.today().date()
+            d = connected_only.copy()
+            d["_days_ago"] = (pd.Timestamp(today) - d["_connected_dt"]).dt.days
+
+            def recency_bucket(days: int) -> str:
+                if days < 0:
+                    return "Future/Invalid"
+                if days <= 30:
+                    return "0–30 days"
+                if days <= 90:
+                    return "31–90 days"
+                if days <= 180:
+                    return "91–180 days"
+                if days <= 365:
+                    return "181–365 days"
+                return "365+ days"
+
+            d["_recency_bucket"] = d["_days_ago"].map(recency_bucket)
+            recency_counts = d["_recency_bucket"].value_counts().reindex(
+                ["0–30 days", "31–90 days", "91–180 days", "181–365 days", "365+ days", "Future/Invalid"]
+            ).dropna()
+
+            bar_chart(
+                recency_counts,
+                title="Connection Recency — Connected Candidates (Matched)",
+                xlabel="Connected candidates",
+                ylabel="Recency bucket",
+                outpath=os.path.join(args.outdir, "connection_recency_connected_candidates_matched.png"),
+                topn=None,
+                show_pct=True,
+                total=len(connected_only),
+                note="How recently matched connections were accepted. " + matched_note,
+                callout=f"Total connected matches: {format_count(len(connected_only))}",
+            )
+
+    # Chart 3: Contacted candidates (matched) over time — monthly (based on message date, if available)
+    if msg_date_col is not None and msg_date_col in msg_extract.columns:
+        msg_extract["_msg_dt"] = parse_dt_flex(msg_extract[msg_date_col])
+        if msg_extract["_msg_dt"].notna().any():
+            monthly_msgs = (
+                msg_extract.dropna(subset=["_msg_dt"])
+                .assign(month=lambda d: d["_msg_dt"].dt.to_period("M").astype(str))
+                .groupby("month")
+                .size()
+            )
+            line_charts_by_year(
+                monthly_msgs,
+                title="Contacted Candidates (Matched) Over Time — Monthly",
+                xlabel="Month",
+                ylabel="Messages involving matched candidates",
+                outpath=os.path.join(args.outdir, "contacted_candidates_matched_over_time_monthly.png"),
+                note="Monthly count of messages that include a matched candidate. " + matched_note,
+            )
+
+    # Chart 4: Top companies among CONNECTED candidates (matched)
+    if conn_company_col is not None and conn_company_col in enriched.columns:
+        connected = enriched[enriched["is_connected_match"]].copy()
+        company_counts = safe_value_counts(connected[conn_company_col])
+        bar_chart(
+            company_counts,
+            title=f"Top Companies — Connected Candidates (Matched) (Top {args.topn})",
+            xlabel="Connected candidates",
+            ylabel="Company",
+            outpath=os.path.join(args.outdir, "top_companies_connected_candidates_matched.png"),
+            topn=args.topn,
+            note="Most common companies among matched connections. " + matched_note,
+            callout=f"Total connected matches: {format_count(len(connected))}",
+        )
+
+    # Chart 5: Top positions among CONNECTED candidates (matched) + seniority
+    if conn_position_col is not None and conn_position_col in enriched.columns:
+        connected = enriched[enriched["is_connected_match"]].copy()
+        pos_counts = safe_value_counts(connected[conn_position_col])
+        bar_chart(
+            pos_counts,
+            title=f"Top Positions — Connected Candidates (Matched) (Top {args.topn})",
+            xlabel="Connected candidates",
+            ylabel="Position",
+            outpath=os.path.join(args.outdir, "top_positions_connected_candidates_matched.png"),
+            topn=args.topn,
+            note="Most common titles among matched connections. " + matched_note,
+            callout=f"Total connected matches: {format_count(len(connected))}",
+        )
+
+        connected["_seniority_bucket"] = connected[conn_position_col].fillna("").astype(str).map(seniority_bucket)
+        seniority_counts = connected["_seniority_bucket"].value_counts()
+        bar_chart(
+            seniority_counts,
+            title="Seniority Buckets — Connected Candidates (Matched)",
+            xlabel="Connected candidates",
+            ylabel="Seniority bucket",
+            outpath=os.path.join(args.outdir, "seniority_buckets_connected_candidates_matched.png"),
+            topn=None,
+            show_pct=True,
+            total=len(connected),
+            note="Distribution of seniority levels for matched connections. " + matched_note,
+            callout=f"Total connected matches: {format_count(len(connected))}",
+        )
+
+    # Chart 6: Message folders distribution for candidate-involved messages
+    if msg_folder_col is not None and msg_folder_col in msg_extract.columns:
+        folder_counts = safe_value_counts(msg_extract[msg_folder_col])
+        bar_chart(
+            folder_counts,
+            title="Message Folders — Contacted Candidates (Matched Messages)",
+            xlabel="Messages",
+            ylabel="Folder",
+            outpath=os.path.join(args.outdir, "message_folders_contacted_candidates_matched.png"),
+            topn=30,
+            show_pct=True,
+            total=len(msg_extract),
+            note="Share of matched messages by folder. " + matched_note,
+            callout=f"Total matched messages: {format_count(len(msg_extract))}",
+        )
+
+
+def try_regenerate_charts_from_cache(args: argparse.Namespace, manifest_path: str) -> bool:
     input_paths = [args.candidates, args.connections, args.messages]
-    expected_outputs = [
-        os.path.join(args.outdir, "candidates_enriched_matches.csv"),
-        os.path.join(args.outdir, "candidates_matching_any.csv"),
-        os.path.join(args.outdir, "candidates_matching_all.csv"),
-        os.path.join(args.outdir, "messages_involving_candidates.csv"),
-    ]
-    if not os.path.exists(manifest_path):
-        charts = list_chart_paths(args.outdir)
-        if charts and outputs_fresh(expected_outputs, input_paths):
-            print("Analysis already exists for these inputs; skipping recompute.")
-            print("Charts:")
-            for p in charts:
-                print(p)
-            raise SystemExit(0)
-        return
-    existing = load_manifest(manifest_path)
-    if not existing:
-        return
-    current = build_manifest(args)
-    if existing.get("inputs") != current.get("inputs"):
-        return
-    charts = list_chart_paths(args.outdir)
-    if not charts:
-        return
-    print("Analysis already exists for these inputs; skipping recompute.")
+    enriched_out = os.path.join(args.outdir, "candidates_enriched_matches.csv")
+    any_out = os.path.join(args.outdir, "candidates_matching_any.csv")
+    all_out = os.path.join(args.outdir, "candidates_matching_all.csv")
+    msg_extract_out = os.path.join(args.outdir, "messages_involving_candidates.csv")
+    expected_outputs = [enriched_out, msg_extract_out]
+
+    if not outputs_fresh(expected_outputs, input_paths):
+        return False
+
+    try:
+        enriched = pd.read_csv(enriched_out)
+        msg_extract = pd.read_csv(msg_extract_out)
+    except OSError:
+        return False
+
+    conn_date_col = find_column(enriched, ["connected on", "connected_on", "connected"])
+    conn_company_col = find_column(enriched, ["company", "current company", "organization"])
+    conn_position_col = find_column(enriched, ["position", "title", "role"])
+    msg_date_col = find_column(msg_extract, ["date", "sent date", "timestamp", "time"])
+    msg_folder_col = find_column(msg_extract, ["folder", "inbox folder", "label"])
+
+    print("Analysis already exists for these inputs; updating charts from cached outputs.")
+    render_charts(
+        enriched=enriched,
+        msg_extract=msg_extract,
+        conn_date_col=conn_date_col,
+        conn_company_col=conn_company_col,
+        conn_position_col=conn_position_col,
+        msg_date_col=msg_date_col,
+        msg_folder_col=msg_folder_col,
+        args=args,
+    )
+
+    manifest = build_manifest(args)
+    manifest["outputs"] = {
+        "csv": [enriched_out, any_out, all_out, msg_extract_out],
+        "charts": list_chart_paths(args.outdir),
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
     print("Charts:")
-    for p in charts:
+    for p in list_chart_paths(args.outdir):
         print(p)
-    raise SystemExit(0)
+    return True
 
 
 # -----------------------------
@@ -259,7 +643,8 @@ def main():
     args = parser.parse_args()
 
     manifest_path = os.path.join(args.outdir, "analysis_manifest_linkedin_metrics.json")
-    maybe_exit_if_analyzed(args, manifest_path)
+    if try_regenerate_charts_from_cache(args, manifest_path):
+        return
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -372,135 +757,16 @@ def main():
     # -----------------------------
     # Charts (clearer naming)
     # -----------------------------
-    # Chart 1: Match segmentation
-    seg_counts = enriched["match_segment"].value_counts()
-    bar_chart(
-        seg_counts,
-        title="Candidate Match Segmentation (Connected vs Contacted)",
-        xlabel="Candidates",
-        ylabel="Match segment",
-        outpath=os.path.join(args.outdir, "candidate_match_segmentation_connected_vs_contacted.png"),
-        topn=None,
+    render_charts(
+        enriched=enriched,
+        msg_extract=msg_extract,
+        conn_date_col=conn_date_col,
+        conn_company_col=conn_company_col,
+        conn_position_col=conn_position_col,
+        msg_date_col=msg_date_col,
+        msg_folder_col=msg_folder_col,
+        args=args,
     )
-
-    # Chart 2: Connected candidates (matched) over time — monthly
-    if conn_date_col is not None and conn_date_col in enriched.columns:
-        connected_dt = parse_dt_flex(enriched[conn_date_col])
-        enriched["_connected_dt"] = connected_dt
-
-        connected_only = enriched[enriched["is_connected_match"] & enriched["_connected_dt"].notna()].copy()
-        if len(connected_only) > 0:
-            monthly_conn = (
-                connected_only.assign(month=lambda d: d["_connected_dt"].dt.to_period("M").astype(str))
-                .groupby("month")
-                .size()
-            )
-            line_chart(
-                monthly_conn,
-                title="Connected Candidates (Matched) Over Time — Monthly",
-                xlabel="Month",
-                ylabel="Connected candidates",
-                outpath=os.path.join(args.outdir, "connected_candidates_matched_over_time_monthly.png"),
-            )
-
-            # Connection recency buckets
-            today = datetime.strptime(args.today, "%Y-%m-%d").date() if args.today else datetime.today().date()
-            d = connected_only.copy()
-            d["_days_ago"] = (pd.Timestamp(today) - d["_connected_dt"]).dt.days
-
-            def recency_bucket(days: int) -> str:
-                if days < 0:
-                    return "Future/Invalid"
-                if days <= 30:
-                    return "0–30 days"
-                if days <= 90:
-                    return "31–90 days"
-                if days <= 180:
-                    return "91–180 days"
-                if days <= 365:
-                    return "181–365 days"
-                return "365+ days"
-
-            d["_recency_bucket"] = d["_days_ago"].map(recency_bucket)
-            recency_counts = d["_recency_bucket"].value_counts().reindex(
-                ["0–30 days", "31–90 days", "91–180 days", "181–365 days", "365+ days", "Future/Invalid"]
-            ).dropna()
-
-            bar_chart(
-                recency_counts,
-                title="Connection Recency — Connected Candidates (Matched)",
-                xlabel="Connected candidates",
-                ylabel="Recency bucket",
-                outpath=os.path.join(args.outdir, "connection_recency_connected_candidates_matched.png"),
-                topn=None,
-            )
-
-    # Chart 3: Contacted candidates (matched) over time — monthly (based on message date, if available)
-    if msg_date_col is not None and msg_date_col in msg_extract.columns:
-        msg_extract["_msg_dt"] = parse_dt_flex(msg_extract[msg_date_col])
-        if msg_extract["_msg_dt"].notna().any():
-            monthly_msgs = (
-                msg_extract.dropna(subset=["_msg_dt"])
-                .assign(month=lambda d: d["_msg_dt"].dt.to_period("M").astype(str))
-                .groupby("month")
-                .size()
-            )
-            line_chart(
-                monthly_msgs,
-                title="Contacted Candidates (Matched) Over Time — Monthly",
-                xlabel="Month",
-                ylabel="Messages involving matched candidates",
-                outpath=os.path.join(args.outdir, "contacted_candidates_matched_over_time_monthly.png"),
-            )
-
-    # Chart 4: Top companies among CONNECTED candidates (matched)
-    if conn_company_col is not None and conn_company_col in enriched.columns:
-        connected = enriched[enriched["is_connected_match"]].copy()
-        company_counts = safe_value_counts(connected[conn_company_col])
-        bar_chart(
-            company_counts,
-            title=f"Top Companies — Connected Candidates (Matched) (Top {args.topn})",
-            xlabel="Connected candidates",
-            ylabel="Company",
-            outpath=os.path.join(args.outdir, "top_companies_connected_candidates_matched.png"),
-            topn=args.topn,
-        )
-
-    # Chart 5: Top positions among CONNECTED candidates (matched) + seniority
-    if conn_position_col is not None and conn_position_col in enriched.columns:
-        connected = enriched[enriched["is_connected_match"]].copy()
-        pos_counts = safe_value_counts(connected[conn_position_col])
-        bar_chart(
-            pos_counts,
-            title=f"Top Positions — Connected Candidates (Matched) (Top {args.topn})",
-            xlabel="Connected candidates",
-            ylabel="Position",
-            outpath=os.path.join(args.outdir, "top_positions_connected_candidates_matched.png"),
-            topn=args.topn,
-        )
-
-        connected["_seniority_bucket"] = connected[conn_position_col].fillna("").astype(str).map(seniority_bucket)
-        seniority_counts = connected["_seniority_bucket"].value_counts()
-        bar_chart(
-            seniority_counts,
-            title="Seniority Buckets — Connected Candidates (Matched)",
-            xlabel="Connected candidates",
-            ylabel="Seniority bucket",
-            outpath=os.path.join(args.outdir, "seniority_buckets_connected_candidates_matched.png"),
-            topn=None,
-        )
-
-    # Chart 6: Message folders distribution for candidate-involved messages
-    if msg_folder_col is not None and msg_folder_col in msg_extract.columns:
-        folder_counts = safe_value_counts(msg_extract[msg_folder_col])
-        bar_chart(
-            folder_counts,
-            title="Message Folders — Contacted Candidates (Matched Messages)",
-            xlabel="Messages",
-            ylabel="Folder",
-            outpath=os.path.join(args.outdir, "message_folders_contacted_candidates_matched.png"),
-            topn=30,
-        )
 
     manifest = build_manifest(args)
     manifest["outputs"] = {
