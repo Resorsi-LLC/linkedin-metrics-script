@@ -47,6 +47,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
+import textwrap
 
 
 # -----------------------------
@@ -100,10 +101,16 @@ def format_compact(value, _pos=None) -> str:
     return f"{sign}{v:.2f}".rstrip("0").rstrip(".")
 
 
-def add_footer(fig, note: str | None) -> None:
+def wrap_text(text: str, width: int) -> str:
+    return "\n".join(textwrap.wrap(text, width=width))
+
+
+def add_footer(fig, note: str | None) -> int:
     if not note:
-        return
-    fig.text(0.01, 0.01, note, ha="left", va="bottom", fontsize=9, color="0.35")
+        return 0
+    wrapped = wrap_text(note, width=110)
+    fig.text(0.01, 0.01, wrapped, ha="left", va="bottom", fontsize=9, color="0.35")
+    return wrapped.count("\n") + 1
 
 
 def add_callout(ax, text: str | None) -> None:
@@ -119,6 +126,15 @@ def add_callout(ax, text: str | None) -> None:
         fontsize=10,
         bbox={"boxstyle": "round,pad=0.3", "fc": "white", "ec": "0.8"},
     )
+
+
+def wrap_axis_labels(ax, axis: str, width: int) -> None:
+    if axis == "y":
+        labels = [wrap_text(t.get_text(), width) for t in ax.get_yticklabels()]
+        ax.set_yticklabels(labels)
+    elif axis == "x":
+        labels = [wrap_text(t.get_text(), width) for t in ax.get_xticklabels()]
+        ax.set_xticklabels(labels)
 
 
 def bar_chart(
@@ -145,8 +161,7 @@ def bar_chart(
     data.sort_values(ascending=True).plot(kind="barh", ax=ax)
 
     # --- FIX: wrap + pad title ---
-    import textwrap
-    wrapped_title = "\n".join(textwrap.wrap(title, width=55))
+    wrapped_title = wrap_text(title, width=55)
     ax.set_title(wrapped_title, fontsize=14, pad=20)
 
     ax.set_xlabel(xlabel)
@@ -176,11 +191,14 @@ def bar_chart(
             fontsize=9,
         )
 
+    wrap_axis_labels(ax, "y", width=24)
+
     add_callout(ax, callout)
-    add_footer(fig, note)
+    footer_lines = add_footer(fig, note)
 
     # Ensure enough space for title and footer
-    plt.subplots_adjust(top=0.88, left=0.35, bottom=0.12)
+    bottom = 0.12 + max(0, footer_lines - 1) * 0.03
+    plt.subplots_adjust(top=0.88, left=0.35, bottom=min(bottom, 0.25))
 
     plt.savefig(outpath, dpi=200)
     plt.close(fig)
@@ -266,18 +284,27 @@ def line_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath:
 
     add_callout(ax, callout)
     footer_note = note or ""
-    if "Months with no activity shown as 0." not in footer_note:
-        footer_note = (footer_note + " " if footer_note else "") + "Months with no activity shown as 0."
-    if "Quarterly peaks are labeled." not in footer_note:
-        footer_note = (footer_note + " " if footer_note else "") + "Quarterly peaks are labeled."
-    add_footer(fig, footer_note)
+    if "Months with no activity are shown as 0." not in footer_note:
+        footer_note = (footer_note + " " if footer_note else "") + "Months with no activity are shown as 0."
+    if "Quarterly highs are labeled." not in footer_note:
+        footer_note = (footer_note + " " if footer_note else "") + "Quarterly highs are labeled."
+    footer_lines = add_footer(fig, footer_note)
 
-    plt.subplots_adjust(top=0.85, bottom=0.18)
+    bottom = 0.18 + max(0, footer_lines - 1) * 0.03
+    plt.subplots_adjust(top=0.85, bottom=min(bottom, 0.32))
     plt.savefig(outpath, dpi=200)
     plt.close(fig)
 
 
-def line_charts_by_year(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: str, note=None) -> None:
+def line_charts_by_year(
+    series: pd.Series,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    outpath: str,
+    note=None,
+    callout_prefix: str | None = None,
+) -> None:
     if series is None or len(series) == 0:
         return
 
@@ -301,7 +328,10 @@ def line_charts_by_year(series: pd.Series, title: str, xlabel: str, ylabel: str,
         year_series = series_dt[series_dt.index.year == year].reindex(full_index).fillna(0)
         year_title = f"{title} ({year})"
         year_outpath = f"{base}_{year}{ext}"
-        year_callout = f"Total in {year}: {format_count(year_series.sum())}"
+        if callout_prefix:
+            year_callout = f"{callout_prefix} {year}: {format_count(year_series.sum())}"
+        else:
+            year_callout = f"Total in {year}: {format_count(year_series.sum())}"
         line_chart(year_series, year_title, xlabel, ylabel, year_outpath, note=note, callout=year_callout)
 
 
@@ -320,7 +350,7 @@ def seniority_bucket(title: str) -> str:
         return "Junior / Entry"
     if t.strip() == "":
         return "Unknown"
-    return "IC (Other)"
+    return "Individual Contributor (Other)"
 
 
 def explode_profile_urls(series: pd.Series) -> pd.Series:
@@ -360,6 +390,7 @@ def build_manifest(args: argparse.Namespace) -> dict:
             "candidates": file_signature(args.candidates),
             "connections": file_signature(args.connections),
             "messages": file_signature(args.messages),
+            "invitations": file_signature(args.invitations) if args.invitations else None,
             "topn": args.topn,
             "today": args.today,
         },
@@ -404,12 +435,12 @@ def ensure_match_segment(enriched: pd.DataFrame) -> None:
         c = bool(r["is_connected_match"])
         m = bool(r["is_contacted_match"])
         if c and m:
-            return "Connected + Contacted (Matched)"
+            return "Connected + Messaged"
         if c and not m:
-            return "Connected Only (Matched)"
+            return "Connected only"
         if (not c) and m:
-            return "Contacted Only (Matched)"
-        return "Not Matched (Neither)"
+            return "Messaged only"
+        return "Not found in other files"
 
     enriched["match_segment"] = enriched.apply(segment_row, axis=1)
 
@@ -423,23 +454,29 @@ def render_charts(
     msg_date_col: str | None,
     msg_folder_col: str | None,
     args: argparse.Namespace,
+    conn_url_set: set[str] | None = None,
+    invitations_df: pd.DataFrame | None = None,
 ) -> None:
     ensure_match_segment(enriched)
-    matched_note = "Matched = candidate LinkedIn URL found in Candidates + referenced file."
+    matched_note = "Found in your CSVs = this person’s LinkedIn URL appears in the Candidates file and the other file used for this chart."
+    people_label = "People"
+    msg_label = "Messages"
+    interview_col = find_column(enriched, ["personal interview status", "interview status"])
+    final_status_col = find_column(enriched, ["final status"])
 
     # Chart 1: Match segmentation
     seg_counts = enriched["match_segment"].value_counts()
     bar_chart(
         seg_counts,
-        title="Candidate Match Segmentation (Connected vs Contacted)",
-        xlabel="Candidates",
-        ylabel="Match segment",
+        title="People found in your files — breakdown",
+        xlabel=people_label,
+        ylabel="Group",
         outpath=os.path.join(args.outdir, "candidate_match_segmentation_connected_vs_contacted.png"),
         topn=None,
         show_pct=True,
         total=len(enriched),
-        note="Share of candidates matched against connections or messages. " + matched_note,
-        callout=f"Total candidates: {format_count(len(enriched))}",
+        note="Total includes all candidates with a valid LinkedIn URL. Share shows who appears in connections or messages. " + matched_note,
+        callout=f"Total people: {format_count(len(enriched))}",
     )
 
     # Chart 2: Connected candidates (matched) over time — monthly
@@ -456,11 +493,12 @@ def render_charts(
             )
             line_charts_by_year(
                 monthly_conn,
-                title="Connected Candidates (Matched) Over Time — Monthly",
+                title="People you connected with, by month",
                 xlabel="Month",
-                ylabel="Connected candidates",
+                ylabel=people_label,
                 outpath=os.path.join(args.outdir, "connected_candidates_matched_over_time_monthly.png"),
-                note="Monthly count of connected candidates present in the input list. " + matched_note,
+                note="Monthly count of people you connected with who appear in your Candidates file. " + matched_note,
+                callout_prefix="People connected in",
             )
 
             # Connection recency buckets
@@ -488,15 +526,15 @@ def render_charts(
 
             bar_chart(
                 recency_counts,
-                title="Connection Recency — Connected Candidates (Matched)",
-                xlabel="Connected candidates",
-                ylabel="Recency bucket",
+                title="How recent your connections are",
+                xlabel=people_label,
+                ylabel="Time since connecting",
                 outpath=os.path.join(args.outdir, "connection_recency_connected_candidates_matched.png"),
                 topn=None,
                 show_pct=True,
                 total=len(connected_only),
-                note="How recently matched connections were accepted. " + matched_note,
-                callout=f"Total connected matches: {format_count(len(connected_only))}",
+                note="How recently you connected with people found in your Candidates file. " + matched_note,
+                callout=f"Total people connected: {format_count(len(connected_only))}",
             )
 
     # Chart 3: Contacted candidates (matched) over time — monthly (based on message date, if available)
@@ -511,11 +549,12 @@ def render_charts(
             )
             line_charts_by_year(
                 monthly_msgs,
-                title="Contacted Candidates (Matched) Over Time — Monthly",
+                title="People you messaged, by month",
                 xlabel="Month",
-                ylabel="Messages involving matched candidates",
+                ylabel=msg_label,
                 outpath=os.path.join(args.outdir, "contacted_candidates_matched_over_time_monthly.png"),
-                note="Monthly count of messages that include a matched candidate. " + matched_note,
+                note="Monthly count of messages that include people in your Candidates file. " + matched_note,
+                callout_prefix="Messages with matched people in",
             )
 
     # Chart 4: Top companies among CONNECTED candidates (matched)
@@ -524,13 +563,13 @@ def render_charts(
         company_counts = safe_value_counts(connected[conn_company_col])
         bar_chart(
             company_counts,
-            title=f"Top Companies — Connected Candidates (Matched) (Top {args.topn})",
-            xlabel="Connected candidates",
+            title=f"Top companies of people you connected with (Top {args.topn})",
+            xlabel=people_label,
             ylabel="Company",
             outpath=os.path.join(args.outdir, "top_companies_connected_candidates_matched.png"),
             topn=args.topn,
-            note="Most common companies among matched connections. " + matched_note,
-            callout=f"Total connected matches: {format_count(len(connected))}",
+            note="Most common companies for people found in your Candidates file. " + matched_note,
+            callout=f"Total people connected: {format_count(len(connected))}",
         )
 
     # Chart 5: Top positions among CONNECTED candidates (matched) + seniority
@@ -539,49 +578,136 @@ def render_charts(
         pos_counts = safe_value_counts(connected[conn_position_col])
         bar_chart(
             pos_counts,
-            title=f"Top Positions — Connected Candidates (Matched) (Top {args.topn})",
-            xlabel="Connected candidates",
+            title=f"Top titles of people you connected with (Top {args.topn})",
+            xlabel=people_label,
             ylabel="Position",
             outpath=os.path.join(args.outdir, "top_positions_connected_candidates_matched.png"),
             topn=args.topn,
-            note="Most common titles among matched connections. " + matched_note,
-            callout=f"Total connected matches: {format_count(len(connected))}",
+            note="Most common titles for people found in your Candidates file. " + matched_note,
+            callout=f"Total people connected: {format_count(len(connected))}",
         )
 
         connected["_seniority_bucket"] = connected[conn_position_col].fillna("").astype(str).map(seniority_bucket)
         seniority_counts = connected["_seniority_bucket"].value_counts()
         bar_chart(
             seniority_counts,
-            title="Seniority Buckets — Connected Candidates (Matched)",
-            xlabel="Connected candidates",
-            ylabel="Seniority bucket",
+            title="Seniority mix of people you connected with",
+            xlabel=people_label,
+            ylabel="Seniority level",
             outpath=os.path.join(args.outdir, "seniority_buckets_connected_candidates_matched.png"),
             topn=None,
             show_pct=True,
             total=len(connected),
-            note="Distribution of seniority levels for matched connections. " + matched_note,
-            callout=f"Total connected matches: {format_count(len(connected))}",
+            note="Distribution of seniority levels for people found in your Candidates file. " + matched_note,
+            callout=f"Total people connected: {format_count(len(connected))}",
         )
 
-    # Chart 6: Message folders distribution for candidate-involved messages
-    if msg_folder_col is not None and msg_folder_col in msg_extract.columns:
-        folder_counts = safe_value_counts(msg_extract[msg_folder_col])
+    # Chart 6: Personal interview status for matched candidates
+    if interview_col is not None and interview_col in enriched.columns:
+        matched_people = enriched[enriched["is_connected_match"] | enriched["is_contacted_match"]].copy()
+        status_raw = matched_people[interview_col].fillna("").astype(str).str.strip()
+
+        def interview_bucket(val: str) -> str:
+            v = val.lower()
+            if v == "":
+                return "No interview"
+            if v in {"passed", "pass"}:
+                return "Passed"
+            if v in {"fail", "failed"}:
+                return "Failed"
+            return "No interview"
+
+        status_bucket = status_raw.map(interview_bucket)
+        status_counts = status_bucket.value_counts().reindex(["Passed", "Failed", "No interview"]).dropna()
         bar_chart(
-            folder_counts,
-            title="Message Folders — Contacted Candidates (Matched Messages)",
-            xlabel="Messages",
-            ylabel="Folder",
-            outpath=os.path.join(args.outdir, "message_folders_contacted_candidates_matched.png"),
-            topn=30,
+            status_counts,
+            title="Interview results for matched people",
+            xlabel=people_label,
+            ylabel="Interview status",
+            outpath=os.path.join(args.outdir, "interview_status_matched_people.png"),
+            topn=None,
             show_pct=True,
-            total=len(msg_extract),
-            note="Share of matched messages by folder. " + matched_note,
-            callout=f"Total matched messages: {format_count(len(msg_extract))}",
+            total=len(matched_people),
+            note="Only includes people found in your Connections or Messages files. " + matched_note,
+            callout=f"Total matched people: {format_count(len(matched_people))}",
         )
+
+    # Chart 8: Final status (Hired vs not) for matched candidates
+    if final_status_col is not None and final_status_col in enriched.columns:
+        matched_people = enriched[enriched["is_connected_match"] | enriched["is_contacted_match"]].copy()
+        status_raw = matched_people[final_status_col].fillna("").astype(str).str.strip()
+
+        def final_status_bucket(val: str) -> str:
+            v = val.lower()
+            if v == "":
+                return "No final status"
+            if v == "hired":
+                return "Hired"
+            return "Not hired"
+
+        status_bucket = status_raw.map(final_status_bucket)
+        status_counts = status_bucket.value_counts().reindex(["Hired", "Not hired", "No final status"]).dropna()
+        bar_chart(
+            status_counts,
+            title="Final outcomes for matched people",
+            xlabel=people_label,
+            ylabel="Final status",
+            outpath=os.path.join(args.outdir, "final_status_matched_people.png"),
+            topn=None,
+            show_pct=True,
+            total=len(matched_people),
+            note="Only includes people found in your Connections or Messages files. " + matched_note,
+            callout=f"Total matched people: {format_count(len(matched_people))}",
+        )
+
+    # Chart 9: Accepted invitations (sent vs received), plus connections with no invitation record
+    if invitations_df is not None and conn_url_set is not None:
+        dir_col = find_column(invitations_df, ["direction"])
+        inviter_col = find_column(invitations_df, ["inviterprofileurl", "inviter_profile_url", "inviter profile url"])
+        invitee_col = find_column(invitations_df, ["inviteeprofileurl", "invitee_profile_url", "invitee profile url"])
+
+        if dir_col and inviter_col and invitee_col:
+            inv = invitations_df.copy()
+            inv_dir = inv[dir_col].fillna("").astype(str).str.strip().str.upper()
+            inviter = normalize_linkedin_url(inv[inviter_col])
+            invitee = normalize_linkedin_url(inv[invitee_col])
+
+            outgoing_mask = inv_dir.isin({"OUTGOING", "SENT"})
+            incoming_mask = inv_dir.isin({"INCOMING", "RECEIVED"})
+
+            accepted_outgoing_set = set(invitee[outgoing_mask][invitee[outgoing_mask].isin(conn_url_set)])
+            accepted_incoming_set = set(inviter[incoming_mask][inviter[incoming_mask].isin(conn_url_set)])
+            accepted_outgoing = len(accepted_outgoing_set)
+            accepted_incoming = len(accepted_incoming_set)
+            accepted_known = accepted_outgoing_set | accepted_incoming_set
+            accepted_unknown = len(conn_url_set - accepted_known)
+
+            counts = pd.Series(
+                {
+                    "Sent & accepted": int(accepted_outgoing),
+                    "Received & accepted": int(accepted_incoming),
+                    "Accepted — not in invitations file": int(accepted_unknown),
+                }
+            )
+            total_accepted = int(len(conn_url_set))
+            bar_chart(
+                counts,
+                title="Accepted invitations — sent vs received",
+                xlabel=people_label,
+                ylabel="Invitation type",
+                outpath=os.path.join(args.outdir, "accepted_invitations_sent_vs_received.png"),
+                topn=None,
+                show_pct=True,
+                total=total_accepted if total_accepted > 0 else None,
+                note="Based on Connections.csv. Some accepted connections may not appear in Invitations.csv.",
+                callout=f"Total accepted invitations: {format_count(total_accepted)}",
+            )
 
 
 def try_regenerate_charts_from_cache(args: argparse.Namespace, manifest_path: str) -> bool:
     input_paths = [args.candidates, args.connections, args.messages]
+    if args.invitations:
+        input_paths.append(args.invitations)
     enriched_out = os.path.join(args.outdir, "candidates_enriched_matches.csv")
     any_out = os.path.join(args.outdir, "candidates_matching_any.csv")
     all_out = os.path.join(args.outdir, "candidates_matching_all.csv")
@@ -596,6 +722,21 @@ def try_regenerate_charts_from_cache(args: argparse.Namespace, manifest_path: st
         msg_extract = pd.read_csv(msg_extract_out)
     except OSError:
         return False
+
+    invitations_df = None
+    conn_url_set = None
+    if args.invitations:
+        try:
+            invitations_df = pd.read_csv(args.invitations)
+            conn = pd.read_csv(args.connections)
+            conn_link_col = find_column(conn, ["url", "linkedin", "linkedin url", "profile url", "profile"])
+            if conn_link_col:
+                conn["linkedin_clean"] = normalize_linkedin_url(conn[conn_link_col])
+                conn = conn[conn["linkedin_clean"].notna() & (conn["linkedin_clean"] != "")].copy()
+                conn_url_set = set(conn["linkedin_clean"].tolist())
+        except OSError:
+            invitations_df = None
+            conn_url_set = None
 
     conn_date_col = find_column(enriched, ["connected on", "connected_on", "connected"])
     conn_company_col = find_column(enriched, ["company", "current company", "organization"])
@@ -613,6 +754,8 @@ def try_regenerate_charts_from_cache(args: argparse.Namespace, manifest_path: st
         msg_date_col=msg_date_col,
         msg_folder_col=msg_folder_col,
         args=args,
+        conn_url_set=conn_url_set,
+        invitations_df=invitations_df,
     )
 
     manifest = build_manifest(args)
@@ -640,6 +783,7 @@ def main():
     parser.add_argument("--outdir", default="./charts")
     parser.add_argument("--topn", type=int, default=20)
     parser.add_argument("--today", default=None, help="Override today as YYYY-MM-DD for recency bucketing.")
+    parser.add_argument("--invitations", default=None, help="Optional LinkedIn invitations export CSV.")
     args = parser.parse_args()
 
     manifest_path = os.path.join(args.outdir, "analysis_manifest_linkedin_metrics.json")
@@ -701,12 +845,12 @@ def main():
         c = bool(r["is_connected_match"])
         m = bool(r["is_contacted_match"])
         if c and m:
-            return "Connected + Contacted (Matched)"
+            return "Connected + Messaged"
         if c and not m:
-            return "Connected Only (Matched)"
+            return "Connected only"
         if (not c) and m:
-            return "Contacted Only (Matched)"
-        return "Not Matched (Neither)"
+            return "Messaged only"
+        return "Not found in other files"
 
     enriched["match_segment"] = enriched.apply(segment_row, axis=1)
 
@@ -766,6 +910,8 @@ def main():
         msg_date_col=msg_date_col,
         msg_folder_col=msg_folder_col,
         args=args,
+        conn_url_set=conn_url_set,
+        invitations_df=pd.read_csv(args.invitations) if args.invitations else None,
     )
 
     manifest = build_manifest(args)

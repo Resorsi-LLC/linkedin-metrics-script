@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+import textwrap
 
 
 # -----------------------------
@@ -183,26 +184,26 @@ def try_regenerate_charts_from_cache(args: argparse.Namespace, manifest_path: st
     seg_counts = base["candidate_label"].value_counts()
     bar_chart(
         seg_counts,
-        "Accepted Connections — Classification (Candidate vs Non-Candidate vs Uncertain)",
-        "Connections",
-        "Class",
+        "Connection types — candidate vs non‑candidate vs unsure",
+        "People",
+        "Type",
         os.path.join(args.outdir, "classification_breakdown.png"),
         show_pct=True,
         total=len(base),
-        note="Share of accepted connections by label.",
-        callout=f"Total accepted connections: {format_count(len(base))}",
+        note="Share of accepted connections by type.",
+        callout=f"Total people connected: {format_count(len(base))}",
     )
 
     rr_counts = pd.Series({"Candidate replied (strict)": num, "Candidate did not reply (strict)": denom - num})
     bar_chart(
         rr_counts,
-        "Candidate Connections — Replies After Acceptance (Strict Date Enforcement)",
-        "Candidates",
+        "Did candidates reply after connecting?",
+        "People",
         "Outcome",
         os.path.join(args.outdir, "candidate_reply_outcomes_strict.png"),
         show_pct=True,
         total=denom,
-        note="Share of candidate connections who replied after acceptance.",
+        note="Share of candidate connections who replied after you connected.",
         callout=f"Total candidates: {format_count(denom)}",
     )
 
@@ -261,10 +262,16 @@ def format_compact(value, _pos=None) -> str:
     return f"{sign}{v:.2f}".rstrip("0").rstrip(".")
 
 
-def add_footer(fig, note: Optional[str]) -> None:
+def wrap_text(text: str, width: int) -> str:
+    return "\n".join(textwrap.wrap(text, width=width))
+
+
+def add_footer(fig, note: Optional[str]) -> int:
     if not note:
-        return
-    fig.text(0.01, 0.01, note, ha="left", va="bottom", fontsize=9, color="0.35")
+        return 0
+    wrapped = wrap_text(note, width=110)
+    fig.text(0.01, 0.01, wrapped, ha="left", va="bottom", fontsize=9, color="0.35")
+    return wrapped.count("\n") + 1
 
 
 def add_callout(ax, text: Optional[str]) -> None:
@@ -282,6 +289,15 @@ def add_callout(ax, text: Optional[str]) -> None:
     )
 
 
+def wrap_axis_labels(ax, axis: str, width: int) -> None:
+    if axis == "y":
+        labels = [wrap_text(t.get_text(), width) for t in ax.get_yticklabels()]
+        ax.set_yticklabels(labels)
+    elif axis == "x":
+        labels = [wrap_text(t.get_text(), width) for t in ax.get_xticklabels()]
+        ax.set_xticklabels(labels)
+
+
 def bar_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: str,
               topn: Optional[int] = None, show_pct: bool = False, total: Optional[int] = None,
               note: Optional[str] = None, callout: Optional[str] = None):
@@ -295,7 +311,7 @@ def bar_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: 
     fig, ax = plt.subplots(figsize=(14, 7))
     data.sort_values(ascending=True).plot(kind="barh", ax=ax)
 
-    wrapped_title = "\n".join(textwrap.wrap(title, width=55))
+    wrapped_title = wrap_text(title, width=55)
     ax.set_title(wrapped_title, fontsize=14, pad=20)
 
     ax.set_xlabel(xlabel)
@@ -325,10 +341,13 @@ def bar_chart(series: pd.Series, title: str, xlabel: str, ylabel: str, outpath: 
             fontsize=9,
         )
 
-    add_callout(ax, callout)
-    add_footer(fig, note)
+    wrap_axis_labels(ax, "y", width=24)
 
-    plt.subplots_adjust(top=0.88, left=0.35, right=0.98, bottom=0.12)
+    add_callout(ax, callout)
+    footer_lines = add_footer(fig, note)
+
+    bottom = 0.12 + max(0, footer_lines - 1) * 0.03
+    plt.subplots_adjust(top=0.88, left=0.35, right=0.98, bottom=min(bottom, 0.25))
 
     plt.savefig(outpath, dpi=200)
     plt.close(fig)
@@ -857,26 +876,26 @@ def main():
         seg_counts = base["candidate_label"].value_counts()
         bar_chart(
             seg_counts,
-            "Accepted Connections — Classification (Candidate vs Non-Candidate vs Uncertain)",
-            "Connections",
-            "Class",
+            "Connection types — candidate vs non‑candidate vs unsure",
+            "People",
+            "Type",
             os.path.join(args.outdir, "classification_breakdown.png"),
             show_pct=True,
             total=len(base),
-            note="Share of accepted connections by label.",
-            callout=f"Total accepted connections: {format_count(len(base))}",
+            note="Share of accepted connections by type.",
+            callout=f"Total people connected: {format_count(len(base))}",
         )
 
         rr_counts = pd.Series({"Candidate replied (strict)": num, "Candidate did not reply (strict)": denom - num})
         bar_chart(
             rr_counts,
-            "Candidate Connections — Replies After Acceptance (Strict Date Enforcement)",
-            "Candidates",
+            "Did candidates reply after connecting?",
+            "People",
             "Outcome",
             os.path.join(args.outdir, "candidate_reply_outcomes_strict.png"),
             show_pct=True,
             total=denom,
-            note="Share of candidate connections who replied after acceptance.",
+            note="Share of candidate connections who replied after you connected.",
             callout=f"Total candidates: {format_count(denom)}",
         )
 

@@ -24,6 +24,16 @@ python linkedin_metrics.py \
   --outdir ./charts \
   --topn 20
 ```
+Optional (accepted invitations chart):
+```bash
+python linkedin_metrics.py \
+  --candidates ./Candidates_2026_01_13.csv \
+  --connections ./Connections.csv \
+  --messages ./messages.csv \
+  --invitations ./Invitations.csv \
+  --outdir ./charts \
+  --topn 20
+```
 
 Inputs (expected columns, case-insensitive):
 - Candidates: `Linkedin` (or `linkedin`, `profile url`)
@@ -40,6 +50,7 @@ Outputs (in `--outdir`):
   - Connected over time (per-year images)
   - Contacted over time (per-year images)
   - Top companies/positions, seniority buckets, recency, folders
+  - Accepted invitations (sent vs received), if `--invitations` is provided
 
 Behavior notes:
 - URLs are normalized (lowercased, query/fragment stripped, trailing slash removed).
