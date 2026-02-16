@@ -2,3 +2,4 @@ out/
 charts/
 .venv/
 *.csv
+platform-sheet-credential.json
