@@ -94,6 +94,15 @@ def format_month_label(year: int, month: int) -> str:
     return datetime(year, month, 1).strftime("%b %Y")
 
 
+def read_connections_csv(path: str) -> pd.DataFrame:
+    """Read a LinkedIn Connections CSV, auto-detecting the preamble lines."""
+    with open(path, "r", encoding="utf-8") as f:
+        first_line = f.readline().strip()
+    if first_line.lower().startswith("notes"):
+        return pd.read_csv(path, skiprows=3, low_memory=False)
+    return pd.read_csv(path, low_memory=False)
+
+
 def slugify_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).strip("_").lower()
@@ -232,80 +241,139 @@ def build_summary_comparison(
 
 def build_definitions_table() -> pd.DataFrame:
     rows = [
+        # --- Section: How to read the recruiter tabs ---
+        {"Metric": "HOW TO READ THE RECRUITER TABS", "Definition": "", "Source": ""},
+        {
+            "Metric": "Cohort Month",
+            "Definition": "Each row is one calendar month. We only count people who connected with the recruiter during that specific month. This lets us track performance over time.",
+            "Source": "Connections.csv",
+        },
+        {
+            "Metric": "Cohort Start / Cohort End",
+            "Definition": "The first and last day of the month for that row (e.g., 2025-01-01 to 2025-01-31).",
+            "Source": "Connections.csv",
+        },
+        {"Metric": "", "Definition": "", "Source": ""},
+        # --- Section: Funnel metrics ---
+        {"Metric": "FUNNEL METRICS (top to bottom of pipeline)", "Definition": "", "Source": ""},
         {
             "Metric": "Connection Requests Sent (est.)",
-            "Definition": "Flat estimate of 1,000 requests per month (250 per week x 4 weeks).",
+            "Definition": "A fixed estimate of 1,000 requests per month (about 250 per week). This is not measured — it is the same number every month. We use it to estimate the acceptance rate.",
             "Source": "Assumption",
         },
         {
             "Metric": "Connections Accepted",
-            "Definition": "Connections in cohort month initiated by recruiter (Sent invites). Connections missing from Invitations are included and flagged internally.",
+            "Definition": "How many people accepted the recruiter's LinkedIn connection request during this month. This is the starting point of the funnel.",
             "Source": "Connections.csv + Invitations.csv",
         },
         {
             "Metric": "Acceptance Rate",
-            "Definition": "Connections Accepted / Connection Requests Sent (est.).",
+            "Definition": "What percentage of sent connection requests were accepted. Formula: Connections Accepted / Connection Requests Sent (est.).",
             "Source": "Calculated",
         },
         {
             "Metric": "Candidates Who Applied",
-            "Definition": "Candidates matched by LinkedIn URL to cohort connections, with Created Time on/after cohort month.",
+            "Definition": "People who connected with the recruiter this month AND later entered our CRM as candidates (matched by their LinkedIn profile URL). \"Applied\" means they progressed from a LinkedIn connection to a real candidate in our system.",
             "Source": "Candidates.csv",
         },
         {
             "Metric": "Application Rate",
-            "Definition": "Candidates Who Applied / Connections Accepted.",
+            "Definition": "What percentage of new connections turned into actual candidates. Formula: Candidates Who Applied / Connections Accepted.",
             "Source": "Calculated",
         },
         {
             "Metric": "Screening — Passed",
-            "Definition": "Cohort candidates with Personal Interview Status = Passed.",
+            "Definition": "Candidates from this cohort who passed Resorsi's internal screening interview (Personal Interview Status = Passed).",
             "Source": "Candidates.csv",
         },
         {
             "Metric": "Screening — Failed",
-            "Definition": "Cohort candidates with Personal Interview Status = Fail.",
+            "Definition": "Candidates from this cohort who did not pass Resorsi's internal screening interview (Personal Interview Status = Fail).",
             "Source": "Candidates.csv",
         },
         {
             "Metric": "Screening Pass Rate",
-            "Definition": "Passed / (Passed + Failed).",
+            "Definition": "Of the candidates who were interviewed, what share passed. Formula: Passed / (Passed + Failed). Candidates with no interview result are excluded from this calculation.",
             "Source": "Calculated",
         },
         {
             "Metric": "Presented to Client",
-            "Definition": "Cohort candidates with Status Candidate in presented/advanced statuses (Review by Customer, Screening Process, Job Offer, Accepted, Hired, Rejected).",
+            "Definition": "Candidates from this cohort who were sent to a client for review. This includes anyone whose deal status reached Review by Customer, Screening Process, Job Offer, Accepted, Hired, or Rejected.",
             "Source": "Deals_X_Cand.csv",
         },
         {
             "Metric": "Presentation Rate",
-            "Definition": "Share of screened-passed candidates that are actually submitted to a client (Presented to Client / Screening — Passed).",
+            "Definition": "Of the candidates who passed our screening, how many did we actually send to a client. Formula: Presented to Client / Screening Passed.",
             "Source": "Calculated",
         },
         {
             "Metric": "Accepted by Client",
-            "Definition": "Cohort candidates with Status Candidate = 300 - Accepted by Customer.",
+            "Definition": "Candidates from this cohort that a client decided to move forward with (Status = Accepted by Customer).",
             "Source": "Deals_X_Cand.csv",
         },
         {
             "Metric": "Rejected by Client",
-            "Definition": "Cohort candidates with Status Candidate = 500 - Rejected by Customer.",
+            "Definition": "Candidates from this cohort that a client decided not to move forward with (Status = Rejected by Customer).",
             "Source": "Deals_X_Cand.csv",
         },
         {
             "Metric": "Client Acceptance Rate",
-            "Definition": "Accepted by Client / Presented to Client.",
+            "Definition": "Of the candidates we presented, what share the client accepted. Formula: Accepted by Client / Presented to Client.",
             "Source": "Calculated",
         },
         {
             "Metric": "Hired",
-            "Definition": "Cohort candidates with Status Candidate = 400 - Hired.",
+            "Definition": "Candidates from this cohort who were ultimately hired by a client (Status = Hired).",
             "Source": "Deals_X_Cand.csv",
         },
         {
             "Metric": "Hire Rate (Top-of-Funnel)",
-            "Definition": "Hired / Connections Accepted.",
+            "Definition": "The big-picture efficiency metric: of all the people who accepted a connection request this month, how many ended up getting hired. Formula: Hired / Connections Accepted.",
             "Source": "Calculated",
+        },
+        {"Metric": "", "Definition": "", "Source": ""},
+        # --- Section: Summary tab ---
+        {"Metric": "HOW TO READ THE SUMMARY TAB", "Definition": "", "Source": ""},
+        {
+            "Metric": "Current Month",
+            "Definition": "The most recent month of data. Shows each recruiter's numbers side by side, plus a Team Average column.",
+            "Source": "",
+        },
+        {
+            "Metric": "3-Month Rolling",
+            "Definition": "Averages the last 3 months of data to smooth out month-to-month noise. For counts (like Connections Accepted, Hired), it shows the 3-month total. For rates (like Acceptance Rate), it shows the 3-month average.",
+            "Source": "",
+        },
+        {
+            "Metric": "6-Month Rolling",
+            "Definition": "Same as 3-Month Rolling but over 6 months. Gives a longer-term view of performance trends.",
+            "Source": "",
+        },
+        {
+            "Metric": "Team Avg",
+            "Definition": "The average across all recruiters for that metric. For counts, it is the average of each recruiter's total. For rates, it is the average of each recruiter's rate.",
+            "Source": "",
+        },
+        {"Metric": "", "Definition": "", "Source": ""},
+        # --- Section: Trades tab ---
+        {"Metric": "HOW TO READ THE TRADES TAB", "Definition": "", "Source": ""},
+        {
+            "Metric": "Trade of Service",
+            "Definition": "The type of role the candidate was sourced for (e.g., Customer Service, Administrative, IT). This breaks down funnel metrics by specialty area so you can see which role types convert best.",
+            "Source": "Candidates.csv",
+        },
+        {
+            "Metric": "Hire Rate from Applied",
+            "Definition": "Of the candidates in this trade who entered the pipeline, how many were hired. Formula: Hired / Candidates Who Applied. This shows which role types have the best end-to-end conversion.",
+            "Source": "Calculated",
+        },
+        {"Metric": "", "Definition": "", "Source": ""},
+        # --- Section: Other columns ---
+        {"Metric": "OTHER COLUMNS", "Definition": "", "Source": ""},
+        {
+            "Metric": "Vendor Filter / Vendor ID",
+            "Definition": "Internal fields used to filter data by recruiter when multiple recruiters share the same Candidates export. You can ignore these columns.",
+            "Source": "Configuration",
         },
     ]
     return pd.DataFrame(rows)
@@ -471,7 +539,16 @@ def write_trade_rollups(
     if not paths:
         return
 
-    frames = [pd.read_csv(p, low_memory=False) for p in paths]
+    frames = []
+    for p in paths:
+        if os.path.getsize(p) == 0:
+            continue
+        try:
+            frames.append(pd.read_csv(p, low_memory=False))
+        except pd.errors.EmptyDataError:
+            continue
+    if not frames:
+        return
     trade_df = pd.concat(frames, ignore_index=True)
 
     trade_df["cohort_start"] = pd.to_datetime(trade_df["cohort_start"], errors="coerce")
@@ -1133,7 +1210,7 @@ def main() -> None:
             recruiter_slug = slugify_name(recruiter_name)
             recruiter_outdir = os.path.join(args.outdir, recruiter_slug)
 
-            conn = cast(pd.DataFrame, pd.read_csv(recruiter["connections"], low_memory=False))
+            conn = cast(pd.DataFrame, read_connections_csv(recruiter["connections"]))
             inv = cast(pd.DataFrame, pd.read_csv(recruiter["invitations"], low_memory=False))
 
             conn_link_col = find_column(conn, ["url", "linkedin", "linkedin url", "profile url", "profile"])
@@ -1284,7 +1361,7 @@ def main() -> None:
     if not args.all_months and (args.month is None or args.year is None):
         raise ValueError("--month and --year are required unless --all-months is used.")
 
-    conn = cast(pd.DataFrame, pd.read_csv(args.connections, low_memory=False))
+    conn = cast(pd.DataFrame, read_connections_csv(args.connections))
     inv = cast(pd.DataFrame, pd.read_csv(args.invitations, low_memory=False))
 
     conn_link_col = find_column(conn, ["url", "linkedin", "linkedin url", "profile url", "profile"])

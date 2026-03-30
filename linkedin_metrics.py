@@ -47,6 +47,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
+
+
+def read_connections_csv(path: str) -> pd.DataFrame:
+    """Read a LinkedIn Connections CSV, auto-detecting the preamble lines."""
+    with open(path, "r", encoding="utf-8") as f:
+        first_line = f.readline().strip()
+    if first_line.lower().startswith("notes"):
+        return pd.read_csv(path, skiprows=3)
+    return pd.read_csv(path)
 import textwrap
 
 
@@ -728,7 +737,7 @@ def try_regenerate_charts_from_cache(args: argparse.Namespace, manifest_path: st
     if args.invitations:
         try:
             invitations_df = pd.read_csv(args.invitations)
-            conn = pd.read_csv(args.connections)
+            conn = read_connections_csv(args.connections)
             conn_link_col = find_column(conn, ["url", "linkedin", "linkedin url", "profile url", "profile"])
             if conn_link_col:
                 conn["linkedin_clean"] = normalize_linkedin_url(conn[conn_link_col])
@@ -794,7 +803,7 @@ def main():
 
     # Load data
     cand = pd.read_csv(args.candidates)
-    conn = pd.read_csv(args.connections)
+    conn = read_connections_csv(args.connections)
     msg = pd.read_csv(args.messages)
 
     # Identify key columns

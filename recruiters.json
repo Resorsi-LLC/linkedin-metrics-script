@@ -2,6 +2,14 @@
   {
     "recruiter_name": "Pedro Belardo",
     "connections": "./Pedro/Connections.csv",
-    "invitations": "./Pedro/Invitations.csv"
+    "invitations": "./Pedro/Invitations.csv",
+    "messages": "./Pedro/messages.csv"
+  },
+  {
+    "recruiter_name": "Jessika",
+    "connections": "./Jessi/Connections.csv",
+    "invitations": "./Jessi/Invitations.csv",
+    "messages": "./Jessi/messages.csv",
+    "ai_since": "2026-01-01"
   }
 ]

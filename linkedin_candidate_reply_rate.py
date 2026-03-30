@@ -5,6 +5,7 @@ import os
 import re
 import textwrap
 import time
+import unicodedata
 from collections import Counter
 from contextlib import contextmanager
 from typing import Dict, List, Optional
@@ -118,6 +119,8 @@ def contains_zoho_form(text: str) -> bool:
 
 
 def file_signature(path: str) -> dict | None:
+    if not path:
+        return None
     try:
         st = os.stat(path)
     except FileNotFoundError:
@@ -629,40 +632,67 @@ def build_ai_prompt(person_url: str, title: str, company: str, connected_on, sta
 # -----------------------------
 # Main
 # -----------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--candidates", required=True)
-    parser.add_argument("--connections", required=True)
-    parser.add_argument("--messages", required=True)
-    parser.add_argument("--outdir", default="./out")
-    parser.add_argument("--use_ai", action="store_true")
-    parser.add_argument("--openai_api_key", default=os.getenv("OPENAI_API_KEY", ""))
-    parser.add_argument("--openai_model", default="gpt-4.1-mini")
-    parser.add_argument("--max_prompt_messages", type=int, default=40)
-    parser.add_argument("--max_prompt_chars", type=int, default=3500)
-    parser.add_argument("--log_level", default="INFO")
-    parser.add_argument("--limit_messages", type=int, default=0, help="For debugging: limit messages rows read (0 = no limit).")
-    parser.add_argument("--limit_connections", type=int, default=0, help="For debugging: limit connections rows read (0 = no limit).")
-    args = parser.parse_args()
+def read_connections_csv(path: str) -> pd.DataFrame:
+    """Read a LinkedIn Connections CSV, auto-detecting the preamble lines."""
+    with open(path, "r", encoding="utf-8") as f:
+        first_line = f.readline().strip()
+    if first_line.lower().startswith("notes"):
+        return pd.read_csv(path, skiprows=3)
+    return pd.read_csv(path)
 
-    manifest_path = os.path.join(args.outdir, "analysis_manifest_reply_rate.json")
-    if try_regenerate_charts_from_cache(args, manifest_path):
-        return
 
-    logger = setup_logger(args.outdir, args.log_level)
+def slugify_name(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).strip("_").lower()
+    return cleaned or "recruiter"
 
-    with step(logger, "Read CSVs"):
-        cand = pd.read_csv(args.candidates)
-        conn = pd.read_csv(args.connections)
-        msg = pd.read_csv(args.messages)
 
-        if args.limit_messages > 0:
-            msg = msg.head(args.limit_messages)
-            logger.warning(f"limit_messages enabled: using first {args.limit_messages:,} message rows")
+def load_recruiters_config(path: str) -> list:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    entries = data.get("recruiters") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        raise ValueError("Recruiters config must be a list or {\"recruiters\": [...]}.")
+    normalized = []
+    for item in entries:
+        if not isinstance(item, dict):
+            raise ValueError("Each recruiter config entry must be an object.")
+        name = item.get("recruiter_name") or item.get("name")
+        connections = item.get("connections") or item.get("connections_path")
+        messages = item.get("messages") or item.get("messages_path")
+        if not name:
+            raise ValueError("Recruiter entry missing recruiter_name.")
+        if not connections:
+            raise ValueError(f"Recruiter '{name}' is missing connections path.")
+        if not messages:
+            raise ValueError(f"Recruiter '{name}' is missing messages path.")
+        ai_since_raw = item.get("ai_since") or item.get("ai_since_date")
+        ai_since = pd.Timestamp(ai_since_raw, tz="UTC") if ai_since_raw else None
+        normalized.append({
+            "recruiter_name": name,
+            "connections": connections,
+            "messages": messages,
+            "ai_since": ai_since,
+        })
+    return normalized
 
-        if args.limit_connections > 0:
-            conn = conn.head(args.limit_connections)
-            logger.warning(f"limit_connections enabled: using first {args.limit_connections:,} connection rows")
+
+def run_analysis(args, conn: pd.DataFrame, msg: pd.DataFrame, cand: pd.DataFrame,
+                 outdir: str, recruiter_label: str = "", ai_since: Optional[pd.Timestamp] = None):
+    """Core analysis logic extracted from main(), operates on pre-loaded DataFrames."""
+    manifest_path = os.path.join(outdir, "analysis_manifest_reply_rate.json")
+
+    logger = setup_logger(outdir, args.log_level)
+    if recruiter_label:
+        logger.info(f"=== Processing recruiter: {recruiter_label} ===")
+
+    if args.limit_messages > 0:
+        msg = msg.head(args.limit_messages)
+        logger.warning(f"limit_messages enabled: using first {args.limit_messages:,} message rows")
+
+    if args.limit_connections > 0:
+        conn = conn.head(args.limit_connections)
+        logger.warning(f"limit_connections enabled: using first {args.limit_connections:,} connection rows")
 
     # Identify columns
     cand_link_col = find_column(cand, ["linkedin", "linkedin url", "linkedin_url", "profile url", "profile"])
@@ -795,6 +825,11 @@ def main():
             raise ValueError("AI enabled but no OpenAI API key provided.")
 
         ai_mask = (base["candidate_label"] == "UNCERTAIN")
+        if ai_since is not None:
+            before_filter = int(ai_mask.sum())
+            ai_mask = ai_mask & base["connected_on"].notna() & (base["connected_on"] >= ai_since)
+            after_filter = int(ai_mask.sum())
+            logger.info(f"ai_since={ai_since.date()} filter: {before_filter:,} UNCERTAIN -> {after_filter:,} eligible for AI ({before_filter - after_filter:,} skipped)")
         ai_rows = base[ai_mask]
         logger.info(f"AI classification needed for {len(ai_rows):,} connections")
 
@@ -854,8 +889,8 @@ def main():
         ]
         strict_excluded_count = int(len(strict_excluded))
 
-        out_all = os.path.join(args.outdir, "connections_enriched_candidate_labels.csv")
-        out_candidates = os.path.join(args.outdir, "candidate_connections_only.csv")
+        out_all = os.path.join(outdir, "connections_enriched_candidate_labels.csv")
+        out_candidates = os.path.join(outdir, "candidate_connections_only.csv")
         base.to_csv(out_all, index=False)
         candidates_only.to_csv(out_candidates, index=False)
 
@@ -869,7 +904,7 @@ def main():
             "ai_used": bool(args.use_ai),
             "model": args.openai_model if args.use_ai else None
         }
-        with open(os.path.join(args.outdir, "summary.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(outdir, "summary.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
 
         # Charts
@@ -879,7 +914,7 @@ def main():
             "Connection types — candidate vs non‑candidate vs unsure",
             "People",
             "Type",
-            os.path.join(args.outdir, "classification_breakdown.png"),
+            os.path.join(outdir, "classification_breakdown.png"),
             show_pct=True,
             total=len(base),
             note="Share of accepted connections by type.",
@@ -892,7 +927,7 @@ def main():
             "Did candidates reply after connecting?",
             "People",
             "Outcome",
-            os.path.join(args.outdir, "candidate_reply_outcomes_strict.png"),
+            os.path.join(outdir, "candidate_reply_outcomes_strict.png"),
             show_pct=True,
             total=denom,
             note="Share of candidate connections who replied after you connected.",
@@ -902,8 +937,8 @@ def main():
         manifest = build_manifest(args)
         manifest["outputs"] = {
             "csv": [out_all, out_candidates],
-            "charts": list_chart_paths(args.outdir),
-            "summary_json": os.path.join(args.outdir, "summary.json"),
+            "charts": list_chart_paths(outdir),
+            "summary_json": os.path.join(outdir, "summary.json"),
         }
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
@@ -915,6 +950,56 @@ def main():
         logger.info(f"Reply rate (strict): {reply_rate:.2%}")
         logger.info(f"Strict excluded (candidate inbound but missing dates): {strict_excluded_count:,}")
         logger.info(f"Outputs: {out_all} | {out_candidates} | summary.json | charts")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidates", required=True)
+    parser.add_argument("--connections", required=False, default=None)
+    parser.add_argument("--messages", required=False, default=None)
+    parser.add_argument("--recruiters-config", default=None, help="JSON config for batch recruiter runs.")
+    parser.add_argument("--outdir", default="./out")
+    parser.add_argument("--use_ai", action="store_true")
+    parser.add_argument("--openai_api_key", default=os.getenv("OPENAI_API_KEY", ""))
+    parser.add_argument("--openai_model", default="gpt-4.1-mini")
+    parser.add_argument("--max_prompt_messages", type=int, default=40)
+    parser.add_argument("--max_prompt_chars", type=int, default=3500)
+    parser.add_argument("--log_level", default="INFO")
+    parser.add_argument("--limit_messages", type=int, default=0, help="For debugging: limit messages rows read (0 = no limit).")
+    parser.add_argument("--limit_connections", type=int, default=0, help="For debugging: limit connections rows read (0 = no limit).")
+    args = parser.parse_args()
+
+    cand = pd.read_csv(args.candidates, low_memory=False)
+
+    if args.recruiters_config:
+        recruiters = load_recruiters_config(args.recruiters_config)
+        for recruiter in recruiters:
+            recruiter_name = recruiter["recruiter_name"]
+            recruiter_slug = slugify_name(recruiter_name)
+            recruiter_outdir = os.path.join(args.outdir, recruiter_slug)
+
+            conn = read_connections_csv(recruiter["connections"])
+            msg = pd.read_csv(recruiter["messages"])
+
+            print(f"\n{'='*60}")
+            print(f"  Recruiter: {recruiter_name}")
+            print(f"  Output:    {recruiter_outdir}")
+            print(f"{'='*60}\n")
+
+            run_analysis(args, conn, msg, cand.copy(), recruiter_outdir,
+                        recruiter_label=recruiter_name, ai_since=recruiter.get("ai_since"))
+    else:
+        if not args.connections or not args.messages:
+            raise ValueError("--connections and --messages are required unless --recruiters-config is used.")
+
+        manifest_path = os.path.join(args.outdir, "analysis_manifest_reply_rate.json")
+        if try_regenerate_charts_from_cache(args, manifest_path):
+            return
+
+        conn = read_connections_csv(args.connections)
+        msg = pd.read_csv(args.messages)
+
+        run_analysis(args, conn, msg, cand, args.outdir)
 
 
 if __name__ == "__main__":
