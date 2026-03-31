@@ -3,3 +3,6 @@ charts/
 .venv/
 *.csv
 platform-sheet-credential.json
+Pedro/
+Jessi/
+__pycache__/
